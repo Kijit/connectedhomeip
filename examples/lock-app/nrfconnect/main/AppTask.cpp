@@ -104,6 +104,8 @@ int AppTask::Init()
 
     // Init ZCL Data Model and start server
     InitServer();
+
+    // QR code will be used with CHIP Tool
     PrintQRCode(chip::RendezvousInformationFlags::kBLE);
 
 #ifdef CONFIG_CHIP_NFC_COMMISSIONING
