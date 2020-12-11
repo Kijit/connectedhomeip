@@ -145,7 +145,8 @@ CHIP_ERROR DeviceController::Init(NodeId localDeviceId, PersistentStorageDelegat
     err = mSessionManager->Init(localDeviceId, mSystemLayer, mTransportMgr);
     SuccessOrExit(err);
 
-    mSessionManager->SetDelegate(this);
+    mExchangeManager = chip::Platform::New<Messaging::ExchangeManager>();
+    mExchangeManager->Init(localDeviceId, mTransportMgr, mSessionManager);
 
     mState         = State::Initialized;
     mLocalDeviceId = localDeviceId;
@@ -209,6 +210,27 @@ CHIP_ERROR DeviceController::SetUdpListenPort(uint16_t listenPort)
     return CHIP_NO_ERROR;
 }
 
+CHIP_ERROR DeviceController::NewDevice(NodeId deviceId, Device ** out_device)
+{
+    CHIP_ERROR err  = CHIP_NO_ERROR;
+    Device * device = nullptr;
+    uint16_t index  = 0;
+
+    VerifyOrExit(out_device != nullptr, err = CHIP_ERROR_INVALID_ARGUMENT);
+    index = FindDeviceIndex(deviceId);
+    VerifyOrExit(index >= kNumMaxActiveDevices, err = CHIP_ERROR_INVALID_ARGUMENT);
+
+    index = GetInactiveDeviceIndex();
+    VerifyOrExit(index < kNumMaxActiveDevices, err = CHIP_ERROR_NO_MEMORY);
+    device = &mActiveDevices[index];
+    device->Init(mTransportMgr, mSessionManager, mInetLayer, mExchangeManager, mListenPort);
+
+    *out_device = device;
+
+exit:
+    return err;
+}
+
 CHIP_ERROR DeviceController::GetDevice(NodeId deviceId, const SerializedDevice & deviceInfo, Device ** out_device)
 {
     CHIP_ERROR err  = CHIP_NO_ERROR;
@@ -233,7 +255,7 @@ CHIP_ERROR DeviceController::GetDevice(NodeId deviceId, const SerializedDevice &
         err = device->Deserialize(deviceInfo);
         VerifyOrExit(err == CHIP_NO_ERROR, ReleaseDevice(device));
 
-        device->Init(mTransportMgr, mSessionManager, mInetLayer, mListenPort);
+        device->Init(mTransportMgr, mSessionManager, mInetLayer, mExchangeManager, mListenPort);
     }
 
     *out_device = device;
@@ -295,7 +317,7 @@ CHIP_ERROR DeviceController::GetDevice(NodeId deviceId, Device ** out_device)
             err = device->Deserialize(deviceInfo);
             VerifyOrExit(err == CHIP_NO_ERROR, ReleaseDevice(device));
 
-            device->Init(mTransportMgr, mSessionManager, mInetLayer, mListenPort);
+            device->Init(mTransportMgr, mSessionManager, mInetLayer, mExchangeManager, mListenPort);
         }
     }
 
@@ -340,66 +362,6 @@ exit:
     return err;
 }
 
-void DeviceController::OnNewConnection(SecureSessionHandle session, SecureSessionMgr * mgr)
-{
-    CHIP_ERROR err = CHIP_NO_ERROR;
-    uint16_t index = 0;
-
-    VerifyOrExit(mState == State::Initialized, err = CHIP_ERROR_INCORRECT_STATE);
-
-    index = FindDeviceIndex(mgr->GetPeerConnectionState(session)->GetPeerNodeId());
-    VerifyOrExit(index < kNumMaxActiveDevices, err = CHIP_ERROR_INVALID_DEVICE_DESCRIPTOR);
-
-    mActiveDevices[index].OnNewConnection(session, mgr);
-
-exit:
-    if (err != CHIP_NO_ERROR)
-    {
-        ChipLogError(Controller, "OnNewConnection: Failed to process received message: err %d", err);
-    }
-}
-
-void DeviceController::OnConnectionExpired(SecureSessionHandle session, SecureSessionMgr * mgr)
-{
-    CHIP_ERROR err = CHIP_NO_ERROR;
-    uint16_t index = 0;
-
-    VerifyOrExit(mState == State::Initialized, err = CHIP_ERROR_INCORRECT_STATE);
-
-    index = FindDeviceIndex(session);
-    VerifyOrExit(index < kNumMaxActiveDevices, err = CHIP_ERROR_INVALID_DEVICE_DESCRIPTOR);
-
-    mActiveDevices[index].OnConnectionExpired(session, mgr);
-
-exit:
-    if (err != CHIP_NO_ERROR)
-    {
-        ChipLogError(Controller, "OnConnectionExpired: Failed to process received message: err %d", err);
-    }
-}
-
-void DeviceController::OnMessageReceived(const PacketHeader & header, const PayloadHeader & payloadHeader,
-                                         SecureSessionHandle session, System::PacketBufferHandle msgBuf, SecureSessionMgr * mgr)
-{
-    CHIP_ERROR err = CHIP_NO_ERROR;
-    uint16_t index = 0;
-
-    VerifyOrExit(mState == State::Initialized, err = CHIP_ERROR_INCORRECT_STATE);
-    VerifyOrExit(header.GetSourceNodeId().HasValue(), err = CHIP_ERROR_INVALID_ARGUMENT);
-
-    index = FindDeviceIndex(session);
-    VerifyOrExit(index < kNumMaxActiveDevices, err = CHIP_ERROR_INVALID_DEVICE_DESCRIPTOR);
-
-    mActiveDevices[index].OnMessageReceived(header, payloadHeader, session, std::move(msgBuf), mgr);
-
-exit:
-    if (err != CHIP_NO_ERROR)
-    {
-        ChipLogError(Controller, "OnMessageReceived: Failed to process received message: err %d", err);
-    }
-    return;
-}
-
 uint16_t DeviceController::GetInactiveDeviceIndex()
 {
     uint16_t i = 0;
@@ -432,20 +394,6 @@ void DeviceController::ReleaseAllDevices()
     {
         ReleaseDevice(&mActiveDevices[i]);
     }
-}
-
-uint16_t DeviceController::FindDeviceIndex(SecureSessionHandle session)
-{
-    uint16_t i = 0;
-    while (i < kNumMaxActiveDevices)
-    {
-        if (mActiveDevices[i].IsActive() && mActiveDevices[i].IsSecureConnected() && mActiveDevices[i].MatchesSession(session))
-        {
-            return i;
-        }
-        i++;
-    }
-    return i;
 }
 
 uint16_t DeviceController::FindDeviceIndex(NodeId id)
@@ -563,7 +511,7 @@ CHIP_ERROR DeviceCommissioner::PairDevice(NodeId remoteDeviceId, RendezvousParam
                                    mSessionManager);
     SuccessOrExit(err);
 
-    device->Init(mTransportMgr, mSessionManager, mInetLayer, mListenPort, remoteDeviceId, remotePort, interfaceId);
+    device->Init(mTransportMgr, mSessionManager, mInetLayer, mExchangeManager, mListenPort, remoteDeviceId, remotePort, interfaceId);
 
     // TODO: BLE rendezvous and IP rendezvous should have same logic in the future after BLE becomes a transport and network
     // provisiong cluster is ready.
@@ -615,7 +563,7 @@ CHIP_ERROR DeviceCommissioner::PairTestDeviceWithoutSecurity(NodeId remoteDevice
 
     testSecurePairingSecret->ToSerializable(device->GetPairing());
 
-    device->Init(mTransportMgr, mSessionManager, mInetLayer, mListenPort, remoteDeviceId, remotePort, interfaceId);
+    device->Init(mTransportMgr, mSessionManager, mInetLayer, mExchangeManager, mListenPort, remoteDeviceId, remotePort, interfaceId);
 
     device->SetAddress(deviceAddr);
 

@@ -29,6 +29,9 @@
 #include <app/util/basic-types.h>
 #include <core/CHIPCallback.h>
 #include <core/CHIPCore.h>
+#include <messaging/Channel.h>
+#include <messaging/ExchangeContext.h>
+#include <messaging/ExchangeMgr.h>
 #include <support/Base64.h>
 #include <support/DLLUtil.h>
 #include <transport/SecurePairingSession.h>
@@ -51,7 +54,7 @@ using DeviceTransportMgr = TransportMgr<Transport::UDP /* IPv6 */
 #endif
                                         >;
 
-class DLL_EXPORT Device
+class DLL_EXPORT Device : public Messaging::ChannelDelegate
 {
 public:
     Device() : mInterface(INET_NULL_INTERFACEID), mActive(false), mState(ConnectionState::NotConnected) {}
@@ -66,17 +69,6 @@ public:
      * @param[in] delegate   The pointer to the delegate object.
      */
     void SetDelegate(DeviceStatusDelegate * delegate) { mStatusDelegate = delegate; }
-
-    // ----- Messaging -----
-    /**
-     * @brief
-     *   Send the provided message to the device
-     *
-     * @param[in] message   The message to be sent.
-     *
-     * @return CHIP_ERROR   CHIP_NO_ERROR on success, or corresponding error
-     */
-    CHIP_ERROR SendMessage(System::PacketBufferHandle message);
 
     /**
      * @brief
@@ -105,11 +97,12 @@ public:
      * @param[in] inetLayer    InetLayer object pointer
      * @param[in] listenPort   Port on which controller is listening (typically CHIP_PORT)
      */
-    void Init(DeviceTransportMgr * transportMgr, SecureSessionMgr * sessionMgr, Inet::InetLayer * inetLayer, uint16_t listenPort)
+    void Init(DeviceTransportMgr * transportMgr, SecureSessionMgr * sessionMgr, Inet::InetLayer * inetLayer, Messaging::ExchangeManager * exchangeManager, uint16_t listenPort)
     {
         mTransportMgr   = transportMgr;
         mSessionManager = sessionMgr;
         mInetLayer      = inetLayer;
+        mExchangeManager = exchangeManager;
         mListenPort     = listenPort;
     }
 
@@ -132,10 +125,10 @@ public:
      * @param[in] devicePort   Port on which device is listening (typically CHIP_PORT)
      * @param[in] interfaceId  Local Interface ID that should be used to talk to the device
      */
-    void Init(DeviceTransportMgr * transportMgr, SecureSessionMgr * sessionMgr, Inet::InetLayer * inetLayer, uint16_t listenPort,
-              NodeId deviceId, uint16_t devicePort, Inet::InterfaceId interfaceId)
+    void Init(DeviceTransportMgr * transportMgr, SecureSessionMgr * sessionMgr, Inet::InetLayer * inetLayer, Messaging::ExchangeManager * exchangeManager,
+              uint16_t listenPort, NodeId deviceId, uint16_t devicePort, Inet::InterfaceId interfaceId)
     {
-        Init(transportMgr, sessionMgr, inetLayer, mListenPort);
+        Init(transportMgr, sessionMgr, inetLayer, exchangeManager, mListenPort);
         mDeviceId   = deviceId;
         mDevicePort = devicePort;
         mInterface  = interfaceId;
@@ -158,41 +151,6 @@ public:
 
     /**
      * @brief
-     *   Called when a new pairing is being established
-     *
-     * @param session A handle to the secure session
-     * @param mgr     A pointer to the SecureSessionMgr
-     */
-    void OnNewConnection(SecureSessionHandle session, SecureSessionMgr * mgr);
-
-    /**
-     * @brief
-     *   Called when a connection is closing.
-     *
-     *   The receiver should release all resources associated with the connection.
-     *
-     * @param session A handle to the secure session
-     * @param mgr     A pointer to the SecureSessionMgr
-     */
-    void OnConnectionExpired(SecureSessionHandle session, SecureSessionMgr * mgr);
-
-    /**
-     * @brief
-     *   This function is called when a message is received from the corresponding CHIP
-     *   device. The message ownership is transferred to the function, and it is expected
-     *   to release the message buffer before returning.
-     *
-     * @param[in] header        Reference to common packet header of the received message
-     * @param[in] payloadHeader Reference to payload header in the message
-     * @param[in] session       A handle to the secure session
-     * @param[in] msgBuf        The message buffer
-     * @param[in] mgr           Pointer to secure session manager which received the message
-     */
-    void OnMessageReceived(const PacketHeader & header, const PayloadHeader & payloadHeader, SecureSessionHandle session,
-                           System::PacketBufferHandle msgBuf, SecureSessionMgr * mgr);
-
-    /**
-     * @brief
      *   Return whether the current device object is actively associated with a paired CHIP
      *   device. An active object can be used to communicate with the corresponding device.
      */
@@ -205,6 +163,7 @@ public:
     void Reset()
     {
         SetActive(false);
+        CloseSession();
         mState          = ConnectionState::NotConnected;
         mSessionManager = nullptr;
         mStatusDelegate = nullptr;
@@ -213,21 +172,38 @@ public:
 
     NodeId GetDeviceId() const { return mDeviceId; }
 
-    bool MatchesSession(SecureSessionHandle session) const { return mSecureSession == session; }
-
     void SetAddress(const Inet::IPAddress & deviceAddr) { mDeviceAddr = deviceAddr; }
 
     SecurePairingSessionSerializable & GetPairing() { return mPairing; }
 
-    void AddResponseHandler(EndpointId endpoint, ClusterId cluster, Callback::Callback<> * onResponse);
-    void AddReportHandler(EndpointId endpoint, ClusterId cluster, Callback::Callback<> * onReport);
+    //SecurePairingSessionSerializable & GetSecureSessoinParametersForUpdate() { return mSecureSessionParameters; }
 
+    /**
+     * @brief Establish a new PASE session, using given pin code
+     */
+    CHIP_ERROR EstablishPaseSession(Inet::IPAddress peerAddr, uint32_t setupPINCode);
+
+    /**
+     * @brief Close the session to the device, it will be deferred until all active exchanges are closed.
+     */
+    void CloseSession() { mChannel.Release(); }
+
+    Messaging::ExchangeContext * NewExchange();
+
+    // Messaging::ChannelDelegate interface
+    void OnEstablished() override;
+    void OnClosed() override;
+    void OnFail(CHIP_ERROR err) override;
 private:
     enum class ConnectionState
     {
         NotConnected,
         Connecting,
         SecureConnected,
+        PaseConnecting,
+        PaseConnected,
+        Disconnected,
+        ConnectFailed,
     };
 
     struct CallbackInfo
@@ -263,6 +239,8 @@ private:
     DeviceStatusDelegate * mStatusDelegate;
 
     SecureSessionMgr * mSessionManager;
+    Messaging::ExchangeManager * mExchangeManager;
+    Messaging::ChannelHandle mChannel;
 
     DeviceTransportMgr * mTransportMgr;
 
@@ -299,14 +277,6 @@ class DLL_EXPORT DeviceStatusDelegate
 {
 public:
     virtual ~DeviceStatusDelegate() {}
-
-    /**
-     * @brief
-     *   Called when a message is received from the device.
-     *
-     * @param[in] msg Received message buffer.
-     */
-    virtual void OnMessage(System::PacketBufferHandle msg) = 0;
 
     /**
      * @brief

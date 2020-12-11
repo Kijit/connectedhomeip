@@ -32,6 +32,7 @@
 #include <controller/CHIPPersistentStorageDelegate.h>
 #include <core/CHIPCore.h>
 #include <core/CHIPTLV.h>
+#include <messaging/ExchangeMgr.h>
 #include <support/DLLUtil.h>
 #include <support/SerializableIntegerSet.h>
 #include <transport/RendezvousSession.h>
@@ -104,7 +105,7 @@ public:
  *   and device pairing information for individual devices). Alternatively, this class can retrieve the
  *   relevant information when the application tries to communicate with the device
  */
-class DLL_EXPORT DeviceController : public SecureSessionMgrDelegate, public PersistentStorageResultDelegate
+class DLL_EXPORT DeviceController : public PersistentStorageResultDelegate
 {
 public:
     DeviceController();
@@ -118,6 +119,18 @@ public:
                     System::Layer * systemLayer = nullptr, Inet::InetLayer * inetLayer = nullptr);
 
     virtual CHIP_ERROR Shutdown();
+
+    /**
+     * @brief
+     *   This function creates a new device in NotConnected state. The caller must not use the Device object If they
+     *   free the DeviceController object, or after they call ReleaseDevice() on the returned device object.
+     *
+     * @param[in] deviceId   Node ID for the CHIP device
+     * @param[out] device    The output device object
+     *
+     * @return CHIP_ERROR CHIP_NO_ERROR on success, or corresponding error code.
+     */
+    CHIP_ERROR NewDevice(NodeId deviceId, Device ** device);
 
     /**
      * @brief
@@ -187,24 +200,17 @@ protected:
     NodeId mLocalDeviceId;
     DeviceTransportMgr * mTransportMgr;
     SecureSessionMgr * mSessionManager;
+    Messaging::ExchangeManager * mExchangeManager;
     PersistentStorageDelegate * mStorageDelegate;
     Inet::InetLayer * mInetLayer;
 
     uint16_t mListenPort;
     uint16_t GetInactiveDeviceIndex();
-    uint16_t FindDeviceIndex(SecureSessionHandle session);
     uint16_t FindDeviceIndex(NodeId id);
     void ReleaseDevice(uint16_t index);
     CHIP_ERROR SetPairedDeviceList(const char * pairedDeviceSerializedSet);
 
 private:
-    //////////// SecureSessionMgrDelegate Implementation ///////////////
-    void OnMessageReceived(const PacketHeader & header, const PayloadHeader & payloadHeader, SecureSessionHandle session,
-                           System::PacketBufferHandle msgBuf, SecureSessionMgr * mgr) override;
-
-    void OnNewConnection(SecureSessionHandle session, SecureSessionMgr * mgr) override;
-    void OnConnectionExpired(SecureSessionHandle session, SecureSessionMgr * mgr) override;
-
     //////////// PersistentStorageResultDelegate Implementation ///////////////
     void OnValue(const char * key, const char * value) override;
     void OnStatus(const char * key, Operation op, CHIP_ERROR err) override;

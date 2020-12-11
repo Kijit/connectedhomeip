@@ -150,10 +150,7 @@ exit:
 
 CHIP_ERROR ChipDeviceController::SetUdpListenPort(uint16_t listenPort)
 {
-    if (mState != kState_Initialized)
-        return CHIP_ERROR_INCORRECT_STATE;
-    mListenPort = listenPort;
-    return CHIP_NO_ERROR;
+    return mCommissioner.SetUdpListenPort(listenPort);
 }
 
 CHIP_ERROR ChipDeviceController::ServiceEvents()
@@ -171,17 +168,6 @@ bool ChipDeviceController::IsConnected() const
     return mState == kState_Initialized;
 }
 
-bool ChipDeviceController::GetIpAddress(Inet::IPAddress & addr)
-{
-    if (!IsConnected())
-        return false;
-
-    if (mDevice == nullptr)
-        InitDevice();
-
-    return mDevice != nullptr && mDevice->GetIpAddress(addr);
-}
-
 CHIP_ERROR ChipDeviceController::DisconnectDevice()
 {
     if (mDevice != nullptr)
@@ -192,53 +178,10 @@ CHIP_ERROR ChipDeviceController::DisconnectDevice()
     return CHIP_NO_ERROR;
 }
 
-CHIP_ERROR ChipDeviceController::SendMessage(void * appReqState, PacketBufferHandle buffer, NodeId peerDevice)
-{
-    CHIP_ERROR err = CHIP_NO_ERROR;
-
-    VerifyOrExit(!buffer.IsNull(), err = CHIP_ERROR_INVALID_ARGUMENT);
-
-    mAppReqState = appReqState;
-
-    if (peerDevice != kUndefinedNodeId)
-    {
-        mRemoteDeviceId = peerDevice;
-    }
-    VerifyOrExit(mRemoteDeviceId != kUndefinedNodeId, err = CHIP_ERROR_INCORRECT_STATE);
-
-    if (mDevice == nullptr)
-    {
-        SuccessOrExit(InitDevice());
-    }
-
-    VerifyOrExit(mDevice != nullptr, err = CHIP_ERROR_INVALID_ARGUMENT);
-    mDevice->SetDelegate(this);
-
-    err = mDevice->SendMessage(std::move(buffer));
-
-exit:
-
-    return err;
-}
-
 CHIP_ERROR ChipDeviceController::SetDevicePairingDelegate(DevicePairingDelegate * pairingDelegate)
 {
     mCommissioner.SetDevicePairingDelegate(pairingDelegate);
     return CHIP_NO_ERROR;
-}
-
-void ChipDeviceController::OnMessage(System::PacketBufferHandle msgBuf)
-{
-    if (mOnComplete.Response != nullptr)
-    {
-        mOnComplete.Response(this, mAppReqState, std::move(msgBuf));
-    }
-}
-
-CHIP_ERROR ChipDeviceController::InitDevice()
-{
-    return mPairingWithoutSecurity ? mCommissioner.GetDevice(mRemoteDeviceId, mSerializedTestDevice, &mDevice)
-                                   : mCommissioner.GetDevice(mRemoteDeviceId, &mDevice);
 }
 
 } // namespace DeviceController

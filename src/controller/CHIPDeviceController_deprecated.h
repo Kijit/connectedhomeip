@@ -61,6 +61,12 @@ public:
     ChipDeviceController();
     ~ChipDeviceController();
 
+
+    Controller::DeviceController * GetNewApi()
+    {
+        return &mCommissioner;
+    }
+
     void * AppState;
 
     /**
@@ -180,9 +186,6 @@ public:
      * @return CHIP_ERROR   The return status
      */
     CHIP_ERROR SetDevicePairingDelegate(Controller::DevicePairingDelegate * pairingDelegate);
-
-    //////////// DeviceStatusDelegate Implementation ///////////////
-    void OnMessage(System::PacketBufferHandle msg) override;
 
 private:
     CHIP_ERROR InitDevice();

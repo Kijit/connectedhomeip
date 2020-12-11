@@ -52,50 +52,6 @@ using namespace chip::Callback;
 namespace chip {
 namespace Controller {
 
-CHIP_ERROR Device::SendMessage(System::PacketBufferHandle buffer)
-{
-    CHIP_ERROR err = CHIP_NO_ERROR;
-
-    System::PacketBufferHandle resend;
-
-    VerifyOrExit(mSessionManager != nullptr, err = CHIP_ERROR_INCORRECT_STATE);
-    VerifyOrExit(!buffer.IsNull(), err = CHIP_ERROR_INVALID_ARGUMENT);
-
-    // If there is no secure connection to the device, try establishing it
-    if (mState != ConnectionState::SecureConnected)
-    {
-        err = LoadSecureSessionParameters(ResetTransport::kNo);
-        SuccessOrExit(err);
-    }
-    else
-    {
-        // Secure connection already exists
-        // Hold on to the buffer, in case session resumption and resend is needed
-        resend = buffer.Retain();
-    }
-
-    err    = mSessionManager->SendMessage(mSecureSession, std::move(buffer));
-    buffer = nullptr;
-    ChipLogDetail(Controller, "SendMessage returned %d", err);
-
-    // The send could fail due to network timeouts (e.g. broken pipe)
-    // Try sesion resumption if needed
-    if (err != CHIP_NO_ERROR && !resend.IsNull() && mState == ConnectionState::SecureConnected)
-    {
-        mState = ConnectionState::NotConnected;
-
-        err = LoadSecureSessionParameters(ResetTransport::kYes);
-        SuccessOrExit(err);
-
-        err = mSessionManager->SendMessage(mSecureSession, std::move(resend));
-        ChipLogDetail(Controller, "Re-SendMessage returned %d", err);
-        SuccessOrExit(err);
-    }
-
-exit:
-    return err;
-}
-
 CHIP_ERROR Device::Serialize(SerializedDevice & output)
 {
     CHIP_ERROR error       = CHIP_NO_ERROR;
@@ -175,67 +131,6 @@ exit:
     return error;
 }
 
-void Device::OnNewConnection(SecureSessionHandle session, SecureSessionMgr * mgr)
-{
-    mState         = ConnectionState::SecureConnected;
-    mSecureSession = session;
-}
-
-void Device::OnConnectionExpired(SecureSessionHandle session, SecureSessionMgr * mgr)
-{
-    mState         = ConnectionState::NotConnected;
-    mSecureSession = SecureSessionHandle{};
-}
-
-void Device::OnMessageReceived(const PacketHeader & header, const PayloadHeader & payloadHeader, SecureSessionHandle session,
-                               System::PacketBufferHandle msgBuf, SecureSessionMgr * mgr)
-{
-    if (mState == ConnectionState::SecureConnected)
-    {
-        if (mStatusDelegate != nullptr)
-        {
-            mStatusDelegate->OnMessage(std::move(msgBuf));
-        }
-
-        // TODO: The following callback processing will need further work
-        //       1. The response needs to be parsed as per cluster definition. The response callback
-        //          should carry the parsed response values.
-        //       2. The reports callbacks should also be called with the parsed reports.
-        //       3. The callbacks would be tracked using exchange context. On receiving the
-        //          message, the exchange context in the message should be matched against
-        //          the registered callbacks.
-        // GitHub issue: https://github.com/project-chip/connectedhomeip/issues/3910
-        Cancelable * ca = mResponses.mNext;
-        while (ca != &mResponses)
-        {
-            Callback::Callback<> * cb = Callback::Callback<>::FromCancelable(ca);
-            // Let's advance to the next cancelable, as the current one will get removed
-            // from the list (and once removed, its next will point to itself)
-            ca = ca->mNext;
-            if (cb != nullptr)
-            {
-                ChipLogProgress(Controller, "Dispatching response callback %p", cb);
-                cb->Cancel();
-                cb->mCall(cb->mContext);
-            }
-        }
-
-        ca = mReports.mNext;
-        while (ca != &mReports)
-        {
-            Callback::Callback<> * cb = Callback::Callback<>::FromCancelable(ca);
-            // Let's advance to the next cancelable, as the current one might get removed
-            // from the list in the callback (and if removed, its next will point to itself)
-            ca = ca->mNext;
-            if (cb != nullptr)
-            {
-                ChipLogProgress(Controller, "Dispatching report callback %p", cb);
-                cb->mCall(cb->mContext);
-            }
-        }
-    }
-}
-
 CHIP_ERROR Device::LoadSecureSessionParameters(ResetTransport resetNeeded)
 {
     CHIP_ERROR err = CHIP_NO_ERROR;
@@ -283,28 +178,57 @@ bool Device::GetIpAddress(Inet::IPAddress & addr) const
     return true;
 }
 
-void Device::AddResponseHandler(EndpointId endpoint, ClusterId cluster, Callback::Callback<> * onResponse)
+CHIP_ERROR Device::EstablishPaseSession(Inet::IPAddress peerAddr, uint32_t setupPINCode)
 {
-    CallbackInfo info                 = { endpoint, cluster };
-    Callback::Cancelable * cancelable = onResponse->Cancel();
+    CHIP_ERROR err = CHIP_NO_ERROR;
 
-    static_assert(sizeof(info) <= sizeof(cancelable->mInfoScalar), "Size of CallbackInfo should be <= size of mInfoScalar");
+    if (mExchangeManager == nullptr || mState == ConnectionState::SecureConnected)
+    {
+        ExitNow(err = CHIP_ERROR_INCORRECT_STATE);
+    }
 
-    cancelable->mInfoScalar = 0;
-    memmove(&cancelable->mInfoScalar, &info, sizeof(info));
-    mResponses.Enqueue(cancelable);
+    {
+        auto state = mChannel.GetState();
+        if (state != Messaging::ChannelState::kChanneState_None && state != Messaging::ChannelState::kChanneState_Closed && state != Messaging::ChannelState::kChanneState_Failed)
+            ExitNow(err = CHIP_ERROR_INCORRECT_STATE);
+
+        mState = ConnectionState::PaseConnecting;
+        Messaging::ChannelBuilder builder;
+        builder.SetPeerNodeId(mDeviceId).SetHintPeerAddress(peerAddr)
+            .SetSessionType(Messaging::ChannelBuilder::SessionType::kSession_PASE).SetPeerSetUpPINCode(setupPINCode);
+        mChannel = mExchangeManager->EstablishChannel(builder, this);
+    }
+
+exit:
+    if (err != CHIP_NO_ERROR)
+    {
+        ChipLogError(Controller, "EstablishPaseSession returning error %d\n", err);
+    }
+    return err;
 }
 
-void Device::AddReportHandler(EndpointId endpoint, ClusterId cluster, Callback::Callback<> * onReport)
+void Device::OnEstablished()
 {
-    CallbackInfo info                 = { endpoint, cluster };
-    Callback::Cancelable * cancelable = onReport->Cancel();
+    // device connected
+    if (mState == ConnectionState::PaseConnecting)
+        mState = ConnectionState::PaseConnected;
+    mStatusDelegate->OnStatusChange();
+}
 
-    static_assert(sizeof(info) <= sizeof(cancelable->mInfoScalar), "Size of CallbackInfo should be <= size of mInfoScalar");
+void Device::OnClosed()
+{
+    // device disconnected
+    if (mState == ConnectionState::PaseConnecting || mState == ConnectionState::PaseConnected)
+        mState = ConnectionState::Disconnected;
+    mStatusDelegate->OnStatusChange();
+}
 
-    cancelable->mInfoScalar = 0;
-    memmove(&cancelable->mInfoScalar, &info, sizeof(info));
-    mReports.Enqueue(cancelable);
+void Device::OnFail(CHIP_ERROR err)
+{
+    // device failure
+    if (mState == ConnectionState::PaseConnecting || mState == ConnectionState::PaseConnected)
+        mState = ConnectionState::ConnectFailed;
+    mStatusDelegate->OnStatusChange();
 }
 
 } // namespace Controller
