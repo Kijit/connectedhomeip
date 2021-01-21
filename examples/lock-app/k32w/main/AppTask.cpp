@@ -21,16 +21,16 @@
 #include "Server.h"
 #include "support/ErrorStr.h"
 
+#include "QRCodeUtil.h"
 #include <platform/CHIPDeviceLayer.h>
 #include <platform/internal/DeviceNetworkInfo.h>
-#include "QRCodeUtil.h"
 
 #include "attribute-storage.h"
 #include "gen/cluster-id.h"
 
 #include "Keyboard.h"
-#include "LEDWidget.h"
 #include "LED.h"
+#include "LEDWidget.h"
 #include "TimersManager.h"
 #include "app_config.h"
 
